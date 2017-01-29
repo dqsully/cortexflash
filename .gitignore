@@ -2,3 +2,4 @@
 cortexflash.exe
 cortexflash
 *.gch
+*.o

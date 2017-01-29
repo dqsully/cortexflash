@@ -13,6 +13,7 @@ export AR
 all:
 	$(CC) -o cortexflash \
 		main.c \
+		parser.c \
 		utils.c \
 		stm32.c \
 		serial_common.c \
@@ -21,7 +22,10 @@ all:
 		-Wall
 
 clean:
-	rm -rf *.o
+	$(shell rm -rf *.o)
+	$(shell rm -rf *.gch)
+	$(shell del /S *.o)
+	$(shell del /S *.gch)
 
 install: all
 	cp cortexflash /usr/local/bin
