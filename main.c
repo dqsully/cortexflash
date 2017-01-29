@@ -14,6 +14,8 @@ serial_baud_t baudRate = SERIAL_BAUD_115200;
 
 char *file = NULL, *port = NULL;
 
+parserPackage_t cacheParser, fileParser;
+
 enum {
   flag_quiet = 0x01,
   flag_force = 0x02,
@@ -130,8 +132,207 @@ int main(int argc, char* argv[]) {
   }
 
   if(!(flags & flag_execute)) {
-    // TODO: flashing code here
+    uint8_t cacheBuffer[256], fileBuffer[256], c;
+    uint32_t addr = stm->dev->fl_start;
+    size_t len, cacheSize, fileSize, offset = 0,
+      maxSize;
+    int i = 0, diffLen;
+    diff_t *difference;
 
+
+    // TODO: try multiple parsers
+
+    // Load cached file if used
+    if(flags & flag_force) {
+      cacheParser = initParser(kStorageType_hex);
+
+      result = cacheParser.parser->open(cacheParser.storage, "cortex.cache");
+      if(result != kParserError_none) {
+        cacheParser.parser->close(cacheParser.storage);
+        printf("Cached file is either nonexistant or corrupt - defaulting to complete re-flash\n");
+        flags |= flag_force;
+      }
+
+      if(flags & flag_force) {
+        cacheSize = cacheParser.parser->size(cacheParser.storage);
+
+        if(cacheSize > stm->dev->fl_end - stm->dev->fl_start) {
+          printf("Cached file is larger than available flash space - defaulting to complete re-flash\n");
+        }
+      }
+    }
+
+
+    fileParser = initParser(kStorageType_hex);
+
+    result = fileParser.parser->open(fileParser.storage, file);
+    if(result != kParserError_none) {
+      cleanup();
+      fprintf(stderr, "Provided file is either nonexistant or corrupt\n");
+      return -1;
+    }
+
+    fileSize = fileParser.parser->size(fileParser.storage);
+
+    if(fileSize > stm->dev->fl_end - stm->dev->fl_start) {
+      cleanup();
+      fprintf(stderr, "Provided file is larger than available flash space\n");
+      return -1;
+    }
+
+    if(flags & flag_force) {
+      // Old flashing method
+      stm32_erase_memory(stm, 0xff);
+
+      // TODO: show progress
+      // TODO: time download
+
+      while(addr < stm->dev->fl_end && offset < fileSize) {
+        len = stm->dev->fl_end - addr;
+        len = sizeof(fileBuffer) > len ? len : sizeof(fileBuffer);
+        len = len > fileSize - offset ? fileSize - offset : len;
+
+        result = fileParser.parser->read(fileParser.storage, fileBuffer, offset, &len);
+        if(result != kParserError_none) {
+          cleanup();
+          return -1;
+        }
+
+        // TODO: verify download?
+        result = stm32_write_memory(stm, addr, fileBuffer, len);
+
+        if(!result) {
+          fprintf(stderr, "\nFailed to write memory at address 0x%08x\n", addr);
+          cleanup();
+          return -1;
+        }
+
+        addr += len;
+        offset += len;
+
+        // TODO: show progress
+      }
+    } else {
+      if(cacheSize > fileSize)
+        maxSize = cacheSize;
+      else
+        maxSize = cacheSize;
+
+
+      difference = calloc(sizeof(diff_t) * maxSize / 256, 1);
+
+      // TODO: show progress
+      // TODO: time difference calculation
+
+      // Calculate differencex
+      while(addr < stm->dev->fl_end && addr < maxSize) {
+        // Deal with file size differences
+        if(addr > fileSize) {
+          len = 256 > maxSize - addr ? maxSize - addr : 256;
+
+          // Because cache is larger, don't read input file
+          difference[i].clear = true;
+          difference[i].len = len;
+          difference[i].offset = offset;
+
+          offset += len;
+          addr += 256;
+          i++;
+
+          continue;
+        } else if(addr > cacheSize) {
+          len = 256 > maxSize - addr ? maxSize - addr : 256;
+
+          difference[i].len = len;
+          difference[i].offset = offset;
+
+          offset += len;
+          addr += 256;
+          i++;
+
+          continue;
+        }
+
+        len = 4;
+
+        // Compute up to a 256 byte difference
+        for(c = 0; c < 256;) {
+          result = fileParser.parser->read(fileParser.storage, fileBuffer, offset + c, &len);
+          if(result != kParserError_none) {
+            cleanup();
+            return -1;
+          }
+
+          // Make sure we don't compare buffers which are inherently different, if we are at end of file
+          if(len < 4) {
+            switch(len) {
+              case 1:
+                fileBuffer[1] = 0;
+              case 2:
+                fileBuffer[2] = 0;
+              case 3:
+                fileBuffer[3] = 0;
+            }
+          }
+
+          result = cacheParser.parser->read(cacheParser.storage, cacheBuffer, offset + c, &len);
+          if(result != kParserError_none) {
+            cleanup();
+            return -1;
+          }
+
+          // Make sure we don't compare buffers which are inherently different, if we are at end of file
+          if(len < 4) {
+            switch(len) {
+              case 1:
+                cacheBuffer[1] = 0;
+              case 2:
+                cacheBuffer[2] = 0;
+              case 3:
+                cacheBuffer[3] = 0;
+            }
+          }
+
+          if((uint32_t)cacheBuffer == (uint32_t)fileBuffer) {
+            if(c > 0)
+              break;
+
+            offset += 4;
+            addr += 4;
+          } else
+            c += 4;
+        }
+
+        difference[i].len = c;
+        difference[i].offset = offset;
+
+        offset += c;
+        addr += c;
+        i++;
+      }
+
+      diffLen = i + 1;
+      addr = stm->dev->fl_start;
+
+      // TODO: show progress
+      // TODO: time download
+
+      // Flash differences
+      for(i = 0; i < diffLen; i++) {
+        len = difference[i].len;
+
+        if(difference[i].clear)
+          memset(fileBuffer, 0, len);
+        else
+          fileParser.parser->read(fileParser.storage, fileBuffer, difference[i].offset, &len);
+
+        result = stm32_write_memory(stm, addr + offset, fileBuffer, len);
+      }
+
+      // TODO: show progress
+
+      free(difference);
+    }
   }
 
   // Execute code
@@ -442,7 +643,11 @@ void showHelp(char *programName) {
 void cleanup() {
   uSleep(20000);
 
-  // TODO: add parser cleanup
+  if(cacheParser.storage)
+    cacheParser.parser->close(cacheParser.storage);
+
+  if(fileParser.storage)
+    fileParser.parser->close(fileParser.storage);
 
   if(stm)
     stm32_close(stm);

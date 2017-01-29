@@ -7,6 +7,7 @@
 
 #include "serial.h"
 #include "stm32.h"
+#include "parser.h"
 
 int main(int argc, char* argv[]);
 bool parseOptions(int argc, char* argv[]);
@@ -17,9 +18,13 @@ int init();
 bool getSystemStatus();
 void enterUserProgram();
 
-typedef struct timespec timespec_t;
-
-timespec_t _time = {0};
+struct timespec _time = {0};
 
 #define nSleep(t) _time.tv_nsec = t; nanosleep(&_time, NULL)
 #define uSleep(t) nSleep(t * 1000)
+
+typedef struct {
+  off_t offset;
+  uint8_t len;
+  bool clear;
+} diff_t;

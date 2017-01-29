@@ -3,12 +3,21 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <string.h>
+#include "utils.h"
+
+typedef enum {
+  kParserError_none,
+  kParserError_system,
+  kParserError_invalidFile,
+} parserError_t;
 
 typedef struct {
-  int (*open)(void *storage, const char *filename);
-  int (*close)(void *storage);
-  int (*size)(void *storage);
-  int (*read)(void *storage, void *data, unsigned int *len);
+  parserError_t (*open)(void *storage, const char *filename);
+  parserError_t (*close)(void *storage);
+  parserError_t (*size)(void *storage);
+  parserError_t (*read)(void *storage, void *data, size_t offset, size_t *len);
 } parser_t;
 typedef struct {
   parser_t *parser;
@@ -29,22 +38,13 @@ typedef struct {
   struct stat stat;
 } binStorage_t;
 
-typedef enum {
-  kParserError_none,
-  kParserError_system,
-  kParserError_invalidFile,
-} parserError_t;
-
-parserPackage_t *initParser(parserType_t parserType);
+parserPackage_t initParser(parserType_t parserType);
 
 parserError_t hex_open(void *storage, const char *filename);
-int hex_close(void *storage);
-int hex_size(void *storage);
-int hex_read(void *storage, void *data, unsigned int *len);
+parserError_t hex_close(void *storage);
+parserError_t hex_size(void *storage);
+parserError_t hex_read(void *storage, void *data, size_t offset, size_t *len);
 parserError_t bin_open(void *storage, const char *filename);
-int bin_close(void *storage);
-int bin_size(void *storage);
-int bin_read(void *storage, void *data, unsigned int *len);
-
-static parser_t hexParser = {hex_open, hex_close, hex_size, hex_read};
-static parser_t binParser = {bin_open, bin_close, bin_size, bin_read};
+parserError_t bin_close(void *storage);
+parserError_t bin_size(void *storage);
+parserError_t bin_read(void *storage, void *data, size_t offset, size_t *len);

@@ -1,22 +1,23 @@
 #include "parser.h"
 
-parserPackage_t *initParser(parserType_t parserType) {
-  parserPackage_t *ret;
+static parser_t hexParser = {hex_open, hex_close, hex_size, hex_read};
+static parser_t binParser = {bin_open, bin_close, bin_size, bin_read};
+
+parserPackage_t initParser(parserType_t parserType) {
+  parserPackage_t ret = {0};
 
   switch(parserType) {
     case kStorageType_hex:
-      ret = malloc(sizeof(parserPackage_t));
-      ret->parser = &hexParser;
-      ret->storage = calloc(sizeof(hexStorage_t), 1);
+      ret.parser = &hexParser;
+      ret.storage = calloc(sizeof(hexStorage_t), 1);
       return ret;
     case kStorageType_bin:
-      ret = malloc(sizeof(parserPackage_t));
-      ret->parser = &binParser;
-      ret->storage = calloc(sizeof(binStorage_t), 1);
+      ret.parser = &binParser;
+      ret.storage = calloc(sizeof(binStorage_t), 1);
       return ret;
   }
 
-  return NULL;
+  return ret;
 }
 
 parserError_t hex_open(void *storage, const char *filename) {
@@ -162,12 +163,40 @@ eBadFile:
   close(fd);
   return kParserError_invalidFile;
 }
-int hex_close(void *storage) {
-
+parserError_t hex_close(void *storage) {
+  hexStorage_t *st = storage;
+  if(st)
+    free(st->data);
+  free(st);
+  return kParserError_none;
 }
-int hex_size(void *storage) {
-
+parserError_t hex_size(void *storage) {
+  hexStorage_t *st = storage;
+  return st->data_len;
 }
-int hex_read(void *storage, void *data, unsigned int *len) {
+parserError_t hex_read(void *storage, void *data, size_t offset, size_t *len) {
+  hexStorage_t *st = storage;
+  size_t get = st->data_len - st->offset;
+  get = get > *len ? *len : get;
 
+  if(offset > st->data_len)
+    return kParserError_system;
+
+  memcpy(data, &st->data[offset], get);
+  *len = get;
+
+  return kParserError_none;
+}
+
+parserError_t bin_open(void *storage, const char *filename) {
+  return kParserError_system;
+}
+parserError_t bin_close(void *storage) {
+  return kParserError_system;
+}
+parserError_t bin_size(void *storage) {
+  return kParserError_system;
+}
+parserError_t bin_read(void *storage, void *data, size_t offset, size_t *len) {
+  return kParserError_system;
 }
