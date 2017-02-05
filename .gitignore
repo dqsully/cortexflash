@@ -3,3 +3,5 @@ cortexflash.exe
 cortexflash
 *.gch
 *.o
+*.hex
+*.cache

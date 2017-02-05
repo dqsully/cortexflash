@@ -3,18 +3,15 @@
 // Global variables
 serial_t *serial = NULL;
 stm32_t *stm = NULL;
-
-void *p_st = NULL;
+parserPackage_t cacheParser, fileParser;
 
 // Constants
 const char zero[4] = {0, 0, 0, 0};
 
 // Settings
 serial_baud_t baudRate = SERIAL_BAUD_115200;
-
 char *file = NULL, *port = NULL;
 
-parserPackage_t cacheParser, fileParser;
 
 enum {
   flag_quiet = 0x01,
@@ -25,6 +22,69 @@ enum {
 
 int flags = 0;
 bool fInit = true;
+
+void beginTimer () {
+
+}
+
+int cp(const char *to, const char *from)
+{
+    int fd_to, fd_from;
+    char buf[4096];
+    ssize_t nread;
+    int saved_errno;
+
+    fd_from = open(from, O_RDONLY);
+    if (fd_from < 0)
+        return -1;
+
+    fd_to = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd_to < 0)
+        goto out_error;
+
+    while (nread = read(fd_from, buf, sizeof buf), nread > 0)
+    {
+        char *out_ptr = buf;
+        ssize_t nwritten;
+
+        do {
+            nwritten = write(fd_to, out_ptr, nread);
+
+            if (nwritten >= 0)
+            {
+                nread -= nwritten;
+                out_ptr += nwritten;
+            }
+            else if (errno != EINTR)
+            {
+                goto out_error;
+            }
+        } while (nread > 0);
+    }
+
+    if (nread == 0)
+    {
+        if (close(fd_to) < 0)
+        {
+            fd_to = -1;
+            goto out_error;
+        }
+        close(fd_from);
+
+        /* Success! */
+        return 0;
+    }
+
+  out_error:
+    saved_errno = errno;
+
+    close(fd_from);
+    if (fd_to >= 0)
+        close(fd_to);
+
+    errno = saved_errno;
+    return -1;
+}
 
 int main(int argc, char* argv[]) {
   int result = 0;
@@ -132,18 +192,19 @@ int main(int argc, char* argv[]) {
   }
 
   if(!(flags & flag_execute)) {
-    uint8_t cacheBuffer[256], fileBuffer[256], c;
+    uint8_t cacheBuffer[256], fileBuffer[256];
     uint32_t addr = stm->dev->fl_start;
     size_t len, cacheSize, fileSize, offset = 0,
-      maxSize;
+      maxSize, minSize;
     int i = 0, diffLen;
+    short c;
     diff_t *difference;
 
 
     // TODO: try multiple parsers
 
     // Load cached file if used
-    if(flags & flag_force) {
+    if(!(flags & flag_force)) {
       cacheParser = initParser(kStorageType_hex);
 
       result = cacheParser.parser->open(cacheParser.storage, "cortex.cache");
@@ -153,7 +214,7 @@ int main(int argc, char* argv[]) {
         flags |= flag_force;
       }
 
-      if(flags & flag_force) {
+      if(!(flags & flag_force)) {
         cacheSize = cacheParser.parser->size(cacheParser.storage);
 
         if(cacheSize > stm->dev->fl_end - stm->dev->fl_start) {
@@ -168,7 +229,7 @@ int main(int argc, char* argv[]) {
     result = fileParser.parser->open(fileParser.storage, file);
     if(result != kParserError_none) {
       cleanup();
-      fprintf(stderr, "Provided file is either nonexistant or corrupt\n");
+      fprintf(stderr, "Provided file is either nonexistant or corrupt (%i)\n", result);
       return -1;
     }
 
@@ -181,6 +242,7 @@ int main(int argc, char* argv[]) {
     }
 
     if(flags & flag_force) {
+      printf("\nFlashing Everything\n");
       // Old flashing method
       stm32_erase_memory(stm, 0xff);
 
@@ -213,22 +275,27 @@ int main(int argc, char* argv[]) {
         // TODO: show progress
       }
     } else {
-      if(cacheSize > fileSize)
+      printf("\nFlashing Differences\n");
+      if(cacheSize > fileSize) {
+        minSize = fileSize;
         maxSize = cacheSize;
-      else
-        maxSize = cacheSize;
+      } else {
+        minSize = cacheSize;
+        maxSize = fileSize;
+      }
 
-
-      difference = calloc(sizeof(diff_t) * maxSize / 256, 1);
+      // TODO: fix this bug
+      // The minimum size of a diff_t spans 4 bytes, then a 4 byte space after it, hence 8
+      difference = calloc(sizeof(diff_t) * maxSize / 8 + 1, 1);
 
       // TODO: show progress
       // TODO: time difference calculation
 
-      // Calculate differencex
-      while(addr < stm->dev->fl_end && addr < maxSize) {
+      // Calculate differences
+      while(addr < stm->dev->fl_end && offset < maxSize) {
         // Deal with file size differences
-        if(addr > fileSize) {
-          len = 256 > maxSize - addr ? maxSize - addr : 256;
+        if(offset > fileSize) {
+          len = 256 > maxSize - offset ? maxSize - offset : 256;
 
           // Because cache is larger, don't read input file
           difference[i].clear = true;
@@ -236,18 +303,18 @@ int main(int argc, char* argv[]) {
           difference[i].offset = offset;
 
           offset += len;
-          addr += 256;
+          addr += len;
           i++;
 
           continue;
-        } else if(addr > cacheSize) {
-          len = 256 > maxSize - addr ? maxSize - addr : 256;
+        } else if(offset > cacheSize) {
+          len = 256 > maxSize - offset ? maxSize - offset : 256;
 
           difference[i].len = len;
           difference[i].offset = offset;
 
           offset += len;
-          addr += 256;
+          addr += len;
           i++;
 
           continue;
@@ -257,8 +324,12 @@ int main(int argc, char* argv[]) {
 
         // Compute up to a 256 byte difference
         for(c = 0; c < 256;) {
-          result = fileParser.parser->read(fileParser.storage, fileBuffer, offset + c, &len);
+          if(offset + c >= minSize)
+            break;
+
+          result = fileParser.parser->read(fileParser.storage, fileBuffer + c, offset + c, &len);
           if(result != kParserError_none) {
+            printf("Error reading file (%i, %i, %i, %i, %i)\n", result, addr, offset + c, minSize, maxSize);
             cleanup();
             return -1;
           }
@@ -275,8 +346,9 @@ int main(int argc, char* argv[]) {
             }
           }
 
-          result = cacheParser.parser->read(cacheParser.storage, cacheBuffer, offset + c, &len);
+          result = cacheParser.parser->read(cacheParser.storage, cacheBuffer + c, offset + c, &len);
           if(result != kParserError_none) {
+            printf("Error reading cache (%i, %i, %i, %i, %i)\n", result, addr, offset + c, minSize, maxSize);
             cleanup();
             return -1;
           }
@@ -293,7 +365,7 @@ int main(int argc, char* argv[]) {
             }
           }
 
-          if((uint32_t)cacheBuffer == (uint32_t)fileBuffer) {
+          if(*(uint32_t*)(cacheBuffer + c) == *(uint32_t*)(fileBuffer + c)) {
             if(c > 0)
               break;
 
@@ -303,6 +375,11 @@ int main(int argc, char* argv[]) {
             c += 4;
         }
 
+        // Skip invalid differences (like the very last one)
+        if(c == 0)
+          continue;
+
+        printf("%i, %i\n", addr, c);
         difference[i].len = c;
         difference[i].offset = offset;
 
@@ -311,7 +388,8 @@ int main(int argc, char* argv[]) {
         i++;
       }
 
-      diffLen = i + 1;
+      diffLen = i;
+      printf("Elements Used: %i\n", diffLen);
       addr = stm->dev->fl_start;
 
       // TODO: show progress
@@ -326,7 +404,8 @@ int main(int argc, char* argv[]) {
         else
           fileParser.parser->read(fileParser.storage, fileBuffer, difference[i].offset, &len);
 
-        result = stm32_write_memory(stm, addr + offset, fileBuffer, len);
+        printf("Writing %i bytes at %li\n", len, addr + difference[i].offset);
+        result = stm32_write_memory(stm, addr + difference[i].offset, fileBuffer, len);
       }
 
       // TODO: show progress
@@ -349,11 +428,18 @@ int main(int argc, char* argv[]) {
       else
         fprintf(stdout, "failed.\n");
     }
+  }
 
-    cleanup();
+  cleanup();
 
-    printf("\n");
-    return 1;
+  printf("\n");
+
+  // Cache file
+  if(!(flags & flag_execute || flags & flag_help)) {
+    printf("Caching input file\n");
+    result = cp("cortex.cache", file);
+    if(result != 0)
+      printf("Copying failed\n");
   }
 
   return 0;

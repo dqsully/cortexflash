@@ -57,7 +57,7 @@ parserError_t hex_open(void *storage, const char *filename) {
       goto eBadFile;
 
     // Setup the checksum
-    checksum = reclen + ((address & 0xff00) >> 8) + ((address & 0x00ff) >> 8) + type;
+    checksum = reclen + ((address & 0xff00) >> 8) + ((address & 0x00ff) >> 0) + type;
 
     switch(type) {
       // Data record
@@ -104,12 +104,12 @@ parserError_t hex_open(void *storage, const char *filename) {
 
       switch(type) {
         case 0:
-        record[i] = c;
+          record[i] = c;
         break;
 
         case 2:
         case 4:
-        base = (base << 8) | c;
+          base = (base << 8) | c;
         break;
       }
     }
