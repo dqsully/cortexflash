@@ -192,13 +192,14 @@ int main(int argc, char* argv[]) {
   }
 
   if(!(flags & flag_execute)) {
-    uint8_t cacheBuffer[256], fileBuffer[256];
+    uint8_t cacheBuffer[2048], fileBuffer[2048], cs;
     uint32_t addr = stm->dev->fl_start;
-    size_t len, cacheSize, fileSize, offset = 0,
+    size_t len, cacheSize, fileSize, offset = 0, flen,
       maxSize, minSize;
-    int i = 0, diffLen;
+    int i = 0, diffLen, bytesFlashed;
     short c;
     diff_t *difference;
+    bool different;
 
 
     // TODO: try multiple parsers
@@ -284,18 +285,19 @@ int main(int argc, char* argv[]) {
         maxSize = fileSize;
       }
 
-      // TODO: fix this bug
-      // The minimum size of a diff_t spans 4 bytes, then a 4 byte space after it, hence 8
-      difference = calloc(sizeof(diff_t) * maxSize / 8 + 1, 1);
+      // The page size is 2k, so that is our minimum size to erase/write
+      difference = calloc(sizeof(diff_t) * maxSize / stm->dev->fl_ps + 1, 1);
+      printf("Elements Allocated: %i\n", maxSize / stm->dev->fl_ps + 1);
 
       // TODO: show progress
       // TODO: time difference calculation
 
+      // TODO: overhaul diff calculation because memory needs to be erased first
       // Calculate differences
-      while(addr < stm->dev->fl_end && offset < maxSize) {
+      while(addr + offset < stm->dev->fl_end && offset < maxSize) {
         // Deal with file size differences
-        if(offset > fileSize) {
-          len = 256 > maxSize - offset ? maxSize - offset : 256;
+        if(offset >= fileSize) {
+          len = stm->dev->fl_ps > maxSize - offset ? maxSize - offset : stm->dev->fl_ps;
 
           // Because cache is larger, don't read input file
           difference[i].clear = true;
@@ -308,7 +310,7 @@ int main(int argc, char* argv[]) {
 
           continue;
         } else if(offset > cacheSize) {
-          len = 256 > maxSize - offset ? maxSize - offset : 256;
+          len = stm->dev->fl_ps > maxSize - offset ? maxSize - offset : stm->dev->fl_ps;
 
           difference[i].len = len;
           difference[i].offset = offset;
@@ -320,12 +322,12 @@ int main(int argc, char* argv[]) {
           continue;
         }
 
-        len = 4;
-
-        // Compute up to a 256 byte difference
-        for(c = 0; c < 256;) {
+        different = false;
+        for(c = 0; c < stm->dev->fl_ps; c += 4) {
           if(offset + c >= minSize)
             break;
+
+          len = 4;
 
           result = fileParser.parser->read(fileParser.storage, fileBuffer + c, offset + c, &len);
           if(result != kParserError_none) {
@@ -346,6 +348,8 @@ int main(int argc, char* argv[]) {
             }
           }
 
+          len = 4;
+
           result = cacheParser.parser->read(cacheParser.storage, cacheBuffer + c, offset + c, &len);
           if(result != kParserError_none) {
             printf("Error reading cache (%i, %i, %i, %i, %i)\n", result, addr, offset + c, minSize, maxSize);
@@ -365,48 +369,210 @@ int main(int argc, char* argv[]) {
             }
           }
 
-          if(*(uint32_t*)(cacheBuffer + c) == *(uint32_t*)(fileBuffer + c)) {
-            if(c > 0)
-              break;
-
-            offset += 4;
-            addr += 4;
-          } else
-            c += 4;
+          if(*(uint32_t*)(cacheBuffer + c) != *(uint32_t*)(fileBuffer + c))
+            different = true;
         }
 
-        // Skip invalid differences (like the very last one)
-        if(c == 0)
-          continue;
+        if(different) {
+          difference[i].offset = offset;
 
-        printf("%i, %i\n", addr, c);
-        difference[i].len = c;
-        difference[i].offset = offset;
+          if(c != stm->dev->fl_ps)
+            difference[i].len = stm->dev->fl_ps > maxSize - offset ? maxSize - offset : stm->dev->fl_ps;
+          else
+            difference[i].len = c;
+
+          i++;
+        }
 
         offset += c;
         addr += c;
-        i++;
       }
 
       diffLen = i;
       printf("Elements Used: %i\n", diffLen);
       addr = stm->dev->fl_start;
 
-      // TODO: show progress
-      // TODO: time download
+      // Erase relevant pages in memory
+      result = stm32_send_command(stm, stm->cmd->er);
+      if(!result) {
+        printf("Failed to erase memory pages\n");
+        cleanup();
+        return -1;
+      }
 
-      // Flash differences
+      // Make i represent the number of pages (cuz I'm lazy)
+      i -= 1;
+      cs = i;
+
+      // Send number of pages
+      stm32_send_byte(stm, i);
+
+      // Send page numbers to erase
+      for(c = 0; c <= i; c++) {
+        stm32_send_byte(stm, difference[c].offset / stm->dev->fl_ps);
+        cs ^= difference[c].offset / stm->dev->fl_ps;
+
+        printf("Erasing page %li\n", difference[c].offset / stm->dev->fl_ps);
+      }
+
+      // Send checksum
+      stm32_send_byte(stm, cs);
+
+      result = stm32_read_byte(stm);
+      if(result != STM32_ACK) {
+        printf("Failed to erase memory pages\n");
+        cleanup();
+        return -1;
+      }
+
+      // Flash Differences
       for(i = 0; i < diffLen; i++) {
         len = difference[i].len;
+        offset = difference[i].offset;
 
-        if(difference[i].clear)
-          memset(fileBuffer, 0, len);
-        else
-          fileParser.parser->read(fileParser.storage, fileBuffer, difference[i].offset, &len);
+        printf("Writing %i bytes at %li (%li)...", len, difference[i].offset, addr + difference[i].offset);
 
-        printf("Writing %i bytes at %li\n", len, addr + difference[i].offset);
-        result = stm32_write_memory(stm, addr + difference[i].offset, fileBuffer, len);
+        for(c = 0; len > 0; c++) {
+          flen = bytesFlashed = len >= 256 ? 256 : len;
+
+          memset(fileBuffer, 0, 256);
+          if(!difference[i].clear)
+            fileParser.parser->read(fileParser.storage, fileBuffer, offset, &flen);
+
+          result = stm32_write_memory(stm, addr + offset, fileBuffer, bytesFlashed);
+          if(!result)
+            printf("Failed to write memory at address 0x%08x\n", addr + offset);
+
+          len -= bytesFlashed;
+          offset += bytesFlashed;
+        }
+
+        printf("done\n");
       }
+
+      // while(addr < stm->dev->fl_end && offset < maxSize) {
+      //   // Deal with file size differences
+      //   if(offset > fileSize) {
+      //     len = 256 > maxSize - offset ? maxSize - offset : 256;
+      //
+      //     // Because cache is larger, don't read input file
+      //     difference[i].clear = true;
+      //     difference[i].len = len;
+      //     difference[i].offset = offset;
+      //
+      //     offset += len;
+      //     addr += len;
+      //     i++;
+      //
+      //     continue;
+      //   } else if(offset > cacheSize) {
+      //     len = 256 > maxSize - offset ? maxSize - offset : 256;
+      //
+      //     difference[i].len = len;
+      //     difference[i].offset = offset;
+      //
+      //     offset += len;
+      //     addr += len;
+      //     i++;
+      //
+      //     continue;
+      //   }
+      //
+      //   len = 4;
+      //
+      //   // Compute up to a 256 byte difference
+      //   for(c = 0; c < 256;) {
+      //     if(offset + c >= minSize)
+      //       break;
+      //
+      //     result = fileParser.parser->read(fileParser.storage, fileBuffer + c, offset + c, &len);
+      //     if(result != kParserError_none) {
+      //       printf("Error reading file (%i, %i, %i, %i, %i)\n", result, addr, offset + c, minSize, maxSize);
+      //       cleanup();
+      //       return -1;
+      //     }
+      //
+      //     // Make sure we don't compare buffers which are inherently different, if we are at end of file
+      //     if(len < 4) {
+      //       switch(len) {
+      //         case 1:
+      //           fileBuffer[1] = 0;
+      //         case 2:
+      //           fileBuffer[2] = 0;
+      //         case 3:
+      //           fileBuffer[3] = 0;
+      //       }
+      //     }
+      //
+      //     result = cacheParser.parser->read(cacheParser.storage, cacheBuffer + c, offset + c, &len);
+      //     if(result != kParserError_none) {
+      //       printf("Error reading cache (%i, %i, %i, %i, %i)\n", result, addr, offset + c, minSize, maxSize);
+      //       cleanup();
+      //       return -1;
+      //     }
+      //
+      //     // Make sure we don't compare buffers which are inherently different, if we are at end of file
+      //     if(len < 4) {
+      //       switch(len) {
+      //         case 1:
+      //           cacheBuffer[1] = 0;
+      //         case 2:
+      //           cacheBuffer[2] = 0;
+      //         case 3:
+      //           cacheBuffer[3] = 0;
+      //       }
+      //     }
+      //
+      //     if(*(uint32_t*)(cacheBuffer + c) == *(uint32_t*)(fileBuffer + c)) {
+      //       if(c > 0)
+      //         break;
+      //
+      //       offset += 4;
+      //       addr += 4;
+      //     } else
+      //       c += 4;
+      //   }
+      //
+      //   // Skip invalid differences (like the very last one)
+      //   if(c == 0)
+      //     continue;
+      //
+      //   printf("%i, %i\n", addr, c);
+      //   difference[i].len = c;
+      //   difference[i].offset = offset;
+      //
+      //   offset += c;
+      //   addr += c;
+      //   i++;
+      // }
+      //
+      // diffLen = i;
+      // printf("Elements Used: %i\n", diffLen);
+      // addr = stm->dev->fl_start;
+      //
+      // // TODO: show progress
+      // // TODO: time download
+      //
+      // // Flash differences
+      // for(i = 0; i < diffLen; i++) {
+      //   len = difference[i].len;
+      //
+      //   printf("Writing %i bytes at %li...", len, addr + difference[i].offset);
+      //
+      //   result = stm32_write_memory(stm, addr + difference[i].offset, eraseBuffer, len);
+      //   if(!result)
+      //     printf("\nFailed to clear memory at address 0x%08x\n", addr + difference[i].offset);
+      //
+      //   if(!difference[i].clear) {
+      //     fileParser.parser->read(fileParser.storage, fileBuffer, difference[i].offset, &len);
+      //
+      //     result = stm32_write_memory(stm, addr + difference[i].offset, fileBuffer, len);
+      //     if(!result)
+      //       printf("\nFailed to write memory at address 0x%08x\n", addr + difference[i].offset);
+      //   }
+      //
+      //   printf("done\n");
+      // }
 
       // TODO: show progress
 
@@ -624,12 +790,14 @@ bool getSystemStatus() {
 
           // Decode some info
           printf("Connection Type  : ");
-          switch(rep[11] & 0x30) {
+          switch(rep[11] & 0x34) {
             case 0x10:
+            case 0x14:
               printf("USB Tether\n");
               break;
 
             case 0x20:
+            case 0x24:
               printf("USB Direct Connection\n");
               break;
 
@@ -638,6 +806,7 @@ bool getSystemStatus() {
               break;
 
             case 0x04:
+            case 0x34:
               printf("WiFi (VEXnet 2.0)\n");
               break;
 

@@ -24,26 +24,6 @@
 #include "stm32.h"
 #include "utils.h"
 
-#define STM32_ACK	0x79
-#define STM32_NACK	0x1F
-#define STM32_CMD_INIT	0x7F
-#define STM32_CMD_GET	0x00	/* get the version and command supported */
-
-struct stm32_cmd {
-	uint8_t get;
-	uint8_t gvr;
-	uint8_t gid;
-	uint8_t rm;
-	uint8_t go;
-	uint8_t wm;
-	uint8_t er; /* this may be extended erase */
-//      uint8_t ee;
-	uint8_t wp;
-	uint8_t uw;
-	uint8_t rp;
-	uint8_t ur;
-};
-
 /* device table */
 const stm32_dev_t devices[] = {
 	{0x412, "Low-density"      , 0x20000200, 0x20002800, 0x08000000, 0x08008000, 4, 1024, 0x1FFFF800, 0x1FFFF80F, 0x1FFFF000, 0x1FFFF800},
@@ -57,12 +37,6 @@ const stm32_dev_t devices[] = {
 	{0x0}
 };
 
-/* internal functions */
-uint8_t stm32_gen_cs(const uint32_t v);
-void    stm32_send_byte(const stm32_t *stm, uint8_t byte);
-uint8_t stm32_read_byte(const stm32_t *stm);
-char    stm32_send_command(const stm32_t *stm, const uint8_t cmd);
-
 /* stm32 programs */
 extern unsigned int	stmreset_length;
 extern unsigned char	stmreset_binary[];
@@ -74,7 +48,7 @@ uint8_t stm32_gen_cs(const uint32_t v) {
 		((v & 0x000000FF) >>  0);
 }
 
-void stm32_send_byte(const stm32_t *stm, uint8_t byte) {	
+void stm32_send_byte(const stm32_t *stm, uint8_t byte) {
 	serial_err_t err;
 	err = serial_write(stm->serial, &byte, 1);
 	if (err != SERIAL_ERR_OK) {
@@ -121,24 +95,24 @@ stm32_t* stm32_init(const serial_t *serial, const char init) {
 		// that stops the first transmit character from being sent
 		// If the serial port has even been opened and closed at least
 		// once and perhaps the baud rate changed, it's hard to tell.
-		
+
         // We don't want to quit if this fails so call serial_read directly
         err = serial_read(stm->serial, &byte, 1);
 
     	if (err != SERIAL_ERR_OK && (--retry > 0) ) {
 		    // Try again
 		    stm32_send_byte(stm, STM32_CMD_INIT);
-		
+
 		    err = serial_read(stm->serial, &byte, 1);
-		    
-		    if( err == SERIAL_ERR_OK ) {	        
+
+		    if( err == SERIAL_ERR_OK ) {
 		        if (byte != STM32_ACK) {
 			        stm32_close(stm);
 			        fprintf(stderr, "Failed to get init ACK from device\n");
 			        return NULL;
 		        }
 		    }
-		}		
+		}
 	}
 
 	/* get the bootloader information */
@@ -164,7 +138,7 @@ stm32_t* stm32_init(const serial_t *serial, const char init) {
 		stm32_close(stm);
 		return NULL;
 	}
-	
+
 	/* get the version and read protection status  */
 	if (!stm32_send_command(stm, stm->cmd->gvr)) {
 		stm32_close(stm);
@@ -334,4 +308,3 @@ char stm32_reset_device(const stm32_t *stm) {
 
 	return stm32_go(stm, stm->dev->ram_start);
 }
-
