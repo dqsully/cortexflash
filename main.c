@@ -454,14 +454,17 @@ int main(int argc, char* argv[]) {
         len = difference[i].len;
         offset = difference[i].offset;
 
+        // Skip rewriting nothing
+        if(difference[i].clear)
+          continue;
+
         printf("Writing %i bytes at %li (%li)...", len, difference[i].offset, addr + difference[i].offset);
 
         for(c = 0; len > 0; c++) {
           flen = bytesFlashed = len >= 256 ? 256 : len;
 
-          memset(fileBuffer, 0, 256);
-          if(!difference[i].clear)
-            fileParser.parser->read(fileParser.storage, fileBuffer, offset, &flen);
+          memset(fileBuffer, 0xff, 256);
+          fileParser.parser->read(fileParser.storage, fileBuffer, offset, &flen);
 
           result = stm32_write_memory(stm, addr + offset, fileBuffer, bytesFlashed);
           if(!result)
