@@ -218,9 +218,9 @@ int main(int argc, char* argv[]) {
   if(!(flags & flag_execute)) {
     uint8_t cacheBuffer[2048], fileBuffer[2048], cs;
     uint32_t addr = stm->dev->fl_start;
-    size_t len, cacheSize, fileSize, offset = 0, flen,
+    size_t len, cacheSize, fileSize, offset = 0, skip, bytesFlashed, flen,
       maxSize, minSize;
-    int i = 0, diffLen, bytesFlashed;
+    int i = 0, diffLen;
     short c;
     diff_t *difference;
     bool different;
@@ -460,18 +460,36 @@ int main(int argc, char* argv[]) {
 
         printf("Writing %i bytes at %li (%li)...", len, difference[i].offset, addr + difference[i].offset);
 
+        skip = 0;
+
         for(c = 0; len > 0; c++) {
+
           flen = bytesFlashed = len >= 256 ? 256 : len;
 
           memset(fileBuffer, 0xff, 256);
-          fileParser.parser->read(fileParser.storage, fileBuffer, offset, &flen);
+          fileParser.parser->read(fileParser.storage, fileBuffer, offset, &bytesFlashed);
 
-          result = stm32_write_memory(stm, addr + offset, fileBuffer, bytesFlashed);
-          if(!result)
-            printf("Failed to write memory at address 0x%08x\n", addr + offset);
+          // Trim beginning of 256 bytes
+          while(*(uint32_t*)(fileBuffer + skip) == 0xffffffff && bytesFlashed > 0) {
+            skip += 4;
+            bytesFlashed -= 4;
+          }
 
-          len -= bytesFlashed;
-          offset += bytesFlashed;
+          // Trim end of 256 bytes
+          while(*(uint32_t*)(fileBuffer + skip + bytesFlashed - 4) == 0xffffffff && bytesFlashed > 0)
+            bytesFlashed -= 4;
+
+          // Make sure we don't try flashing if there are not bytes to flash
+          if(bytesFlashed > 0) {
+            result = stm32_write_memory(stm, addr + offset, fileBuffer + skip, bytesFlashed);
+            if(!result)
+              printf("Failed to write memory at address 0x%08x\n", addr + offset);
+          }
+
+          printf("%i,", bytesFlashed);
+
+          len -= flen;
+          offset += flen;
         }
 
         printf("done\n");
